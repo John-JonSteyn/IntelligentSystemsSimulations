@@ -1,0 +1,124 @@
+name: Auto Versioning
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    types: [closed]
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  versioning_job:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine Bump Type
+        id: determine_bump
+        run: |
+          echo "Event: $GITHUB_EVENT_NAME"
+
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            # Only act on merged PRs
+            merged=$(jq -r '.pull_request.merged' "$GITHUB_EVENT_PATH")
+            if [ "$merged" != "true" ]; then
+              echo "PR not merged. No version bump."
+              echo "bump_type=none" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+
+            # If any label name contains "bug" (case insensitive) -> minor bump
+            if jq -e '.pull_request.labels[]? | select(.name | ascii_downcase | contains("bug"))' "$GITHUB_EVENT_PATH" > /dev/null; then
+              echo "Merged PR with bug label. Using minor bump."
+              echo "bump_type=minor" >> $GITHUB_OUTPUT
+            else
+              echo "Merged PR without bug label. Using major bump."
+              echo "bump_type=major" >> $GITHUB_OUTPUT
+            fi
+
+          elif [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            message=$(jq -r '.head_commit.message' "$GITHUB_EVENT_PATH")
+
+            # Ignore merge commits from PRs (version handled on PR closed)
+            if echo "$message" | grep -qi "merge pull request"; then
+              echo "Push is a merge commit from a PR. No version bump."
+              echo "bump_type=none" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+
+            # Ignore our own auto version bump commits to avoid double bump
+            if echo "$message" | grep -qi "auto version bump to"; then
+              echo "Push is an auto version bump commit. No additional bump."
+              echo "bump_type=none" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+
+            # All other direct pushes to main -> minor bump
+            echo "Direct push to main. Using minor bump."
+            echo "bump_type=minor" >> $GITHUB_OUTPUT
+
+          else
+            echo "Unsupported event. No version bump."
+            echo "bump_type=none" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Bump Version
+        id: bump_version
+        env:
+          BUMP_TYPE: ${{ steps.determine_bump.outputs.bump_type }}
+        run: |
+          if [ "$BUMP_TYPE" = "none" ]; then
+            echo "No version bump requested. Exiting."
+            exit 0
+          fi
+
+          file="IntelligentSystemsSimulations/Assets/app-version.json"
+
+          if [ ! -f "$file" ]; then
+            echo "Version file not found at $file"
+            exit 1
+          fi
+
+          current_version=$(jq -r '.version' "$file")
+          echo "Current version: $current_version"
+
+          IFS='.' read -r major minor patch <<< "$current_version"
+
+          if [ "$BUMP_TYPE" = "minor" ]; then
+            new_minor=$((minor + 1))
+            new_version="${major}.${new_minor}.0"
+          elif [ "$BUMP_TYPE" = "major" ]; then
+            new_major=$((major + 1))
+            new_version="${new_major}.0.0"
+          else
+            echo "Unknown bump type: $BUMP_TYPE"
+            exit 1
+          fi
+
+          echo "New version: $new_version"
+          echo "{\"version\": \"$new_version\"}" > "$file"
+          echo "new_version=$new_version" >> $GITHUB_OUTPUT
+
+      - name: Commit Version Bump
+        if: steps.bump_version.outputs.new_version
+        run: |
+          git config --local user.email "$GITHUB_ACTOR@users.noreply.github.com"
+          git config --local user.name "$GITHUB_ACTOR"
+          git add "IntelligentSystemsSimulations/Assets/app-version.json"
+          git commit -m "Auto version bump to ${{ steps.bump_version.outputs.new_version }}" || echo "No changes to commit"
+
+      - name: Push Changes
+        if: steps.bump_version.outputs.new_version
+        uses: ad-m/github-push-action@master
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          branch: main
