@@ -28,7 +28,6 @@ jobs:
           echo "Event: $GITHUB_EVENT_NAME"
 
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
-            # Only act on merged PRs
             merged=$(jq -r '.pull_request.merged' "$GITHUB_EVENT_PATH")
             if [ "$merged" != "true" ]; then
               echo "PR not merged. No version bump."
@@ -36,7 +35,6 @@ jobs:
               exit 0
             fi
 
-            # If any label name contains "bug" (case insensitive) -> minor bump
             if jq -e '.pull_request.labels[]? | select(.name | ascii_downcase | contains("bug"))' "$GITHUB_EVENT_PATH" > /dev/null; then
               echo "Merged PR with bug label. Using minor bump."
               echo "bump_type=minor" >> $GITHUB_OUTPUT
@@ -48,21 +46,18 @@ jobs:
           elif [ "$GITHUB_EVENT_NAME" = "push" ]; then
             message=$(jq -r '.head_commit.message' "$GITHUB_EVENT_PATH")
 
-            # Ignore merge commits from PRs (version handled on PR closed)
             if echo "$message" | grep -qi "merge pull request"; then
               echo "Push is a merge commit from a PR. No version bump."
               echo "bump_type=none" >> $GITHUB_OUTPUT
               exit 0
             fi
 
-            # Ignore our own auto version bump commits to avoid double bump
             if echo "$message" | grep -qi "auto version bump to"; then
               echo "Push is an auto version bump commit. No additional bump."
               echo "bump_type=none" >> $GITHUB_OUTPUT
               exit 0
             fi
 
-            # All other direct pushes to main -> minor bump
             echo "Direct push to main. Using minor bump."
             echo "bump_type=minor" >> $GITHUB_OUTPUT
 
@@ -91,14 +86,19 @@ jobs:
           current_version=$(jq -r '.version' "$file")
           echo "Current version: $current_version"
 
-          IFS='.' read -r major minor patch <<< "$current_version"
+          IFS='.' read -r base_major middle_segment last_segment <<< "$current_version"
+
+          if [ -z "$base_major" ] || [ -z "$middle_segment" ] || [ -z "$last_segment" ]; then
+            echo "Version format is invalid. Expected base_major.middle_segment.last_segment"
+            exit 1
+          fi
 
           if [ "$BUMP_TYPE" = "minor" ]; then
-            new_minor=$((minor + 1))
-            new_version="${major}.${new_minor}.0"
+            new_last_segment=$((last_segment + 1))
+            new_version="${base_major}.${middle_segment}.${new_last_segment}"
           elif [ "$BUMP_TYPE" = "major" ]; then
-            new_major=$((major + 1))
-            new_version="${new_major}.0.0"
+            new_middle_segment=$((middle_segment + 1))
+            new_version="${base_major}.${new_middle_segment}.0"
           else
             echo "Unknown bump type: $BUMP_TYPE"
             exit 1
